@@ -2,11 +2,15 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { chromium } = require("@playwright/test");
 const { google } = require("googleapis");
+const XLSX = require("xlsx");
 
 const TARGET_URL = "https://www.ineedtours.com/es/tours.html";
+const BOOKINGS_URL = "https://www.ineedtours.com/V05/paginas/privadas/listado_reservas.aspx";
 const SPREADSHEET_ID = "1wBZKRRFBJZAUWdPsGa9hX3Ifak8zjKktaTdHFsx3Rms";
-const SHEET_NAME = "Hoja 1";
+const SHEET_NAME = "Reservas I Need Tours";
 const OUTPUT_DIR = path.resolve("artifacts");
+const EXCEL_DOWNLOAD_PATH = path.join(OUTPUT_DIR, "downloads", "reservas.xlsx");
+const EXCEL_BUTTON_SELECTOR = "#ContentPlaceHolder_ctl02_lnkExcel";
 
 function requiredEnv(name) {
   const value = process.env[name];
@@ -16,9 +20,18 @@ function requiredEnv(name) {
   return value;
 }
 
+function quoteSheetName(sheetName) {
+  return `'${sheetName.replaceAll("'", "''")}'`;
+}
+
+function sheetRange(a1Range) {
+  return `${quoteSheetName(SHEET_NAME)}!${a1Range}`;
+}
+
 async function ensureDirs() {
   await fs.mkdir(path.join(OUTPUT_DIR, "videos"), { recursive: true });
   await fs.mkdir(path.join(OUTPUT_DIR, "screenshots"), { recursive: true });
+  await fs.mkdir(path.join(OUTPUT_DIR, "downloads"), { recursive: true });
 }
 
 async function writeRunMetadata(metadata) {
@@ -26,31 +39,163 @@ async function writeRunMetadata(metadata) {
   await fs.writeFile(destination, JSON.stringify(metadata, null, 2), "utf8");
 }
 
-async function appendRunLogToSheets(status) {
+function getSheetsClient() {
   const credentialsRaw = requiredEnv("CREDENCIALES_JSON");
   const credentials = JSON.parse(credentialsRaw);
   const auth = new google.auth.GoogleAuth({
     credentials,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"]
   });
-  const sheets = google.sheets({ version: "v4", auth });
+  return google.sheets({ version: "v4", auth });
+}
 
-  await sheets.spreadsheets.values.append({
+function excelDateToIso(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  if (typeof value === "number") {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (!parsed) {
+      return "";
+    }
+    const asUtc = new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d));
+    return asUtc.toISOString().slice(0, 10);
+  }
+  if (typeof value === "string" && value.trim()) {
+    const normalized = value.trim().replaceAll("/", "-");
+    const directDate = new Date(normalized);
+    if (!Number.isNaN(directDate.getTime())) {
+      return directDate.toISOString().slice(0, 10);
+    }
+
+    const ddmmyyyy = normalized.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+    if (ddmmyyyy) {
+      const day = Number(ddmmyyyy[1]);
+      const month = Number(ddmmyyyy[2]);
+      const year = Number(ddmmyyyy[3]);
+      const asUtc = new Date(Date.UTC(year, month - 1, day));
+      return asUtc.toISOString().slice(0, 10);
+    }
+  }
+  return "";
+}
+
+function subtractDaysFromIso(isoDate, days) {
+  if (!isoDate) {
+    return "";
+  }
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+function sanitizeMoney(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return String(value).replace("$", "").replaceAll(".", "").replace(",", ".").trim();
+}
+
+function transformReservationRows(excelPath) {
+  const workbook = XLSX.readFile(excelPath, { cellDates: true });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) {
+    throw new Error("El archivo Excel descargado no tiene hojas.");
+  }
+
+  const sheet = workbook.Sheets[firstSheetName];
+  const sourceRows = XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    raw: true,
+    defval: ""
+  });
+
+  if (sourceRows.length <= 1) {
+    return [];
+  }
+
+  return sourceRows.slice(1).map((row) => {
+    const out = [...row];
+
+    const travelDateIso = excelDateToIso(out[5]);
+    out[5] = travelDateIso;
+    out[7] = subtractDaysFromIso(travelDateIso, 15);
+
+    out[9] = sanitizeMoney(out[9]);
+    out[10] = sanitizeMoney(out[10]);
+    return out;
+  });
+}
+
+async function overwriteSheetWithRows(rows) {
+  const sheets = getSheetsClient();
+  await sheets.spreadsheets.values.clear({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A:E`,
+    range: sheetRange("A2:ZZ")
+  });
+
+  if (rows.length === 0) {
+    return;
+  }
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: sheetRange("A2"),
     valueInputOption: "USER_ENTERED",
     requestBody: {
-      values: [
-        [
-          new Date().toISOString(),
-          status,
-          "login+video",
-          process.env.GITHUB_RUN_ID || "local",
-          "Pendiente: descargar y pegar reporte final"
-        ]
-      ]
+      values: rows
     }
   });
+}
+
+async function goToBookingsPage(page) {
+  const modalCloseButton = page.locator(
+    "#modalbody button.close[data-dismiss='modal'][aria-hidden='true']"
+  );
+  const modalBody = page.locator("#modalbody");
+  const modalBackdrop = page.locator(".modal-backdrop");
+
+  // Close welcome modal with multiple strategies (button, outside click, Esc, JS fallback).
+  if (await modalBody.isVisible({ timeout: 20000 }).catch(() => false)) {
+    if (await modalCloseButton.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await modalCloseButton.click({ force: true }).catch(() => null);
+    }
+
+    if (await modalBody.isVisible({ timeout: 1500 }).catch(() => false)) {
+      if (await modalBackdrop.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await modalBackdrop.click({ force: true }).catch(() => null);
+      }
+      await page.locator("body").click({ force: true, position: { x: 5, y: 5 } }).catch(() => null);
+    }
+
+    if (await modalBody.isVisible({ timeout: 1500 }).catch(() => false)) {
+      await page.keyboard.press("Escape").catch(() => null);
+    }
+
+    if (await modalBody.isVisible({ timeout: 1500 }).catch(() => false)) {
+      await page.evaluate(() => {
+        const modal = document.querySelector("#modalbody");
+        if (modal) {
+          modal.classList.remove("in", "show");
+          modal.setAttribute("aria-hidden", "true");
+          modal.setAttribute("style", "display:none;");
+        }
+        document.querySelectorAll(".modal-backdrop").forEach((el) => el.remove());
+        document.body.classList.remove("modal-open");
+        document.body.style.removeProperty("padding-right");
+      });
+    }
+
+    await modalBody.waitFor({ state: "hidden", timeout: 10000 }).catch(() => null);
+  }
+
+  // Then go directly to bookings page and continue with download flow.
+  await page.goto(BOOKINGS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
+
+  await page.waitForSelector(EXCEL_BUTTON_SELECTOR, { state: "visible", timeout: 60000 });
 }
 
 async function run() {
@@ -71,6 +216,8 @@ async function run() {
   const pageVideo = page.video();
 
   let loginStatus = "LOGIN_OK";
+  let downloadedRows = 0;
+  let videoFile = "";
 
   try {
     await page.goto(TARGET_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
@@ -81,7 +228,19 @@ async function run() {
     await page.fill("#ctl26_ctl00_txtClave", pass);
     await page.click("#ctl26_ctl00_btnLogin");
 
-    await page.waitForTimeout(7000);
+    await goToBookingsPage(page);
+
+    const [download] = await Promise.all([
+      page.waitForEvent("download", { timeout: 90000 }),
+      page.click(EXCEL_BUTTON_SELECTOR)
+    ]);
+    await download.saveAs(EXCEL_DOWNLOAD_PATH);
+
+    const transformedRows = transformReservationRows(EXCEL_DOWNLOAD_PATH);
+    downloadedRows = transformedRows.length;
+    await overwriteSheetWithRows(transformedRows);
+
+    await page.waitForTimeout(2000);
     await page.screenshot({
       path: path.join(OUTPUT_DIR, "screenshots", "post-login.png"),
       fullPage: true
@@ -108,15 +267,17 @@ async function run() {
   if (rawVideoPath !== finalVideoPath) {
     await fs.copyFile(rawVideoPath, finalVideoPath);
   }
+  videoFile = path.relative(process.cwd(), finalVideoPath).replaceAll("\\", "/");
 
   await writeRunMetadata({
     loginStatus,
     runAt: new Date().toISOString(),
     targetUrl: TARGET_URL,
-    videoFile: path.relative(process.cwd(), finalVideoPath).replaceAll("\\", "/")
+    bookingsUrl: BOOKINGS_URL,
+    downloadedExcel: path.relative(process.cwd(), EXCEL_DOWNLOAD_PATH).replaceAll("\\", "/"),
+    rowsPastedToSheet: downloadedRows,
+    videoFile
   });
-
-  await appendRunLogToSheets(loginStatus);
 }
 
 run().catch(async (error) => {
