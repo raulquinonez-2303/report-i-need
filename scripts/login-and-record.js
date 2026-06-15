@@ -92,6 +92,17 @@ function subtractDaysFromIso(isoDate, days) {
   return date.toISOString().slice(0, 10);
 }
 
+function formatIsoToDdMmYyyy(isoDate) {
+  if (!isoDate) {
+    return "";
+  }
+  const parts = isoDate.split("-");
+  if (parts.length !== 3) {
+    return "";
+  }
+  return `${parts[2]}/${parts[1]}/${parts[0]}`;
+}
+
 function sanitizeMoney(value) {
   if (value === null || value === undefined) {
     return "";
@@ -121,8 +132,8 @@ function transformReservationRows(excelPath) {
     const out = [...row];
 
     const travelDateIso = excelDateToIso(out[5]);
-    out[5] = travelDateIso;
-    out[7] = subtractDaysFromIso(travelDateIso, 15);
+    out[5] = formatIsoToDdMmYyyy(travelDateIso);
+    out[7] = formatIsoToDdMmYyyy(subtractDaysFromIso(travelDateIso, 15));
 
     out[9] = sanitizeMoney(out[9]);
     out[10] = sanitizeMoney(out[10]);
@@ -147,6 +158,64 @@ async function overwriteSheetWithRows(rows) {
     valueInputOption: "USER_ENTERED",
     requestBody: {
       values: rows
+    }
+  });
+
+  await applyDateFormatting(sheets);
+}
+
+async function applyDateFormatting(sheets) {
+  const spreadsheet = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: "sheets(properties(sheetId,title))"
+  });
+  const targetSheet = spreadsheet.data.sheets?.find(
+    (sheet) => sheet.properties?.title === SHEET_NAME
+  );
+
+  if (!targetSheet?.properties?.sheetId && targetSheet?.properties?.sheetId !== 0) {
+    throw new Error(`No se encontró la pestaña "${SHEET_NAME}" para aplicar formato de fecha.`);
+  }
+
+  const sheetId = targetSheet.properties.sheetId;
+  const dateFormatRequest = {
+    userEnteredFormat: {
+      numberFormat: {
+        type: "DATE",
+        pattern: "dd/mm/yyyy"
+      }
+    }
+  };
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 5,
+              endColumnIndex: 6
+            },
+            cell: dateFormatRequest,
+            fields: "userEnteredFormat.numberFormat"
+          }
+        },
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 7,
+              endColumnIndex: 8
+            },
+            cell: dateFormatRequest,
+            fields: "userEnteredFormat.numberFormat"
+          }
+        }
+      ]
     }
   });
 }
