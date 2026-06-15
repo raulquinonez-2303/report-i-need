@@ -49,58 +49,70 @@ function getSheetsClient() {
   return google.sheets({ version: "v4", auth });
 }
 
-function excelDateToIso(value) {
+function parseDateParts(value) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value.toISOString().slice(0, 10);
+    return {
+      y: value.getFullYear(),
+      m: value.getMonth() + 1,
+      d: value.getDate()
+    };
   }
+
   if (typeof value === "number") {
     const parsed = XLSX.SSF.parse_date_code(value);
-    if (!parsed) {
-      return "";
+    if (parsed) {
+      return { y: parsed.y, m: parsed.m, d: parsed.d };
     }
-    const asUtc = new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d));
-    return asUtc.toISOString().slice(0, 10);
   }
+
   if (typeof value === "string" && value.trim()) {
-    const normalized = value.trim().replaceAll("/", "-");
-    const directDate = new Date(normalized);
-    if (!Number.isNaN(directDate.getTime())) {
-      return directDate.toISOString().slice(0, 10);
+    const raw = value.trim();
+    const ddmmyyyy = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (ddmmyyyy) {
+      return {
+        d: Number(ddmmyyyy[1]),
+        m: Number(ddmmyyyy[2]),
+        y: Number(ddmmyyyy[3])
+      };
     }
 
-    const ddmmyyyy = normalized.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
-    if (ddmmyyyy) {
-      const day = Number(ddmmyyyy[1]);
-      const month = Number(ddmmyyyy[2]);
-      const year = Number(ddmmyyyy[3]);
-      const asUtc = new Date(Date.UTC(year, month - 1, day));
-      return asUtc.toISOString().slice(0, 10);
+    const yyyymmdd = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (yyyymmdd) {
+      return {
+        y: Number(yyyymmdd[1]),
+        m: Number(yyyymmdd[2]),
+        d: Number(yyyymmdd[3])
+      };
     }
   }
-  return "";
+
+  return null;
 }
 
-function subtractDaysFromIso(isoDate, days) {
-  if (!isoDate) {
-    return "";
+function subtractDaysFromDateParts(parts, days) {
+  if (!parts) {
+    return null;
   }
-  const date = new Date(`${isoDate}T00:00:00Z`);
+  const date = new Date(Date.UTC(parts.y, parts.m - 1, parts.d));
   if (Number.isNaN(date.getTime())) {
-    return "";
+    return null;
   }
   date.setUTCDate(date.getUTCDate() - days);
-  return date.toISOString().slice(0, 10);
+  return {
+    y: date.getUTCFullYear(),
+    m: date.getUTCMonth() + 1,
+    d: date.getUTCDate()
+  };
 }
 
-function formatIsoToDdMmYyyy(isoDate) {
-  if (!isoDate) {
+function formatDatePartsToDdMmYyyy(parts) {
+  if (!parts) {
     return "";
   }
-  const parts = isoDate.split("-");
-  if (parts.length !== 3) {
-    return "";
-  }
-  return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  const day = String(parts.d).padStart(2, "0");
+  const month = String(parts.m).padStart(2, "0");
+  const year = String(parts.y);
+  return `${day}/${month}/${year}`;
 }
 
 function sanitizeMoney(value) {
@@ -131,9 +143,9 @@ function transformReservationRows(excelPath) {
   return sourceRows.slice(1).map((row) => {
     const out = [...row];
 
-    const travelDateIso = excelDateToIso(out[5]);
-    out[5] = formatIsoToDdMmYyyy(travelDateIso);
-    out[7] = formatIsoToDdMmYyyy(subtractDaysFromIso(travelDateIso, 15));
+    const travelDateParts = parseDateParts(out[5]);
+    out[5] = formatDatePartsToDdMmYyyy(travelDateParts);
+    out[7] = formatDatePartsToDdMmYyyy(subtractDaysFromDateParts(travelDateParts, 15));
 
     out[9] = sanitizeMoney(out[9]);
     out[10] = sanitizeMoney(out[10]);
