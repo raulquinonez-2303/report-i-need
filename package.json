@@ -1,0 +1,13 @@
+{
+  "name": "report-i-need",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bot para login en iNeedTours, registrar evidencia en video y preparar carga a Google Sheets.",
+  "scripts": {
+    "bot:login": "node scripts/login-and-record.js"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.54.1",
+    "googleapis": "^144.0.0"
+  }
+}

@@ -1,0 +1,41 @@
+name: iNeed Login Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 10 * * *"
+
+jobs:
+  login-and-record:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run bot
+        env:
+          USER_INEED: ${{ secrets.USER_INEED }}
+          PASS_INEED: ${{ secrets.PASS_INEED }}
+          CREDENCIALES_JSON: ${{ secrets.CREDENCIALES_JSON }}
+        run: npm run bot:login
+
+      - name: Upload artifacts (video + screenshots)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ineed-login-artifacts-${{ github.run_number }}
+          path: artifacts/
+          if-no-files-found: warn
