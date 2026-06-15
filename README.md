@@ -46,7 +46,7 @@ Archivo: `.github/workflows/login-report-bot.yml`
 Se ejecuta:
 
 - manualmente con `workflow_dispatch`.
-- diariamente (cron `0 10 * * *`).
+- diariamente a las `08:00` (UTC-3), cron `0 11 * * *` en GitHub Actions (UTC).
 
 Sube artifacts en cada corrida (incluyendo fallos):
 
